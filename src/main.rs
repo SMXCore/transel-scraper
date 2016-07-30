@@ -2,7 +2,7 @@ extern crate hyper;
 extern crate rustc_serialize;
 extern crate time;
 use hyper::client::*;
-use rustc_serialize::json::Json;
+use rustc_serialize::json::{Json, encode};
 use std::thread::sleep;
 use std::time::Duration;
 
@@ -12,25 +12,31 @@ use std::path::Path;
 
 use std::sync::{Arc, Mutex};
 use std::thread;
+use std::collections::btree_map::BTreeMap;
 
 fn print_to_file(file: &Arc<Mutex<File>>, string: &str) -> Result<usize, std::io::Error> {
     file.lock().unwrap().write(string.as_bytes())
 }
 
-fn get(bufdeposit: Arc<Mutex<Vec<u8>>>, semaphor: Arc<Mutex<bool>>) {
+fn get(bufdeposit: Arc<Mutex<String>>, semaphor: Arc<Mutex<bool>>) {
+	let now = time::now();
     let client = Client::new();
     let site_transel = "http://www.transelectrica.ro/sen-filter";
     let mut res = client.get(site_transel).send().unwrap();
     assert_eq!(res.status, hyper::Ok);
     let mut buf = Vec::new();
     let _ = res.read_to_end(&mut buf).unwrap();
-    bufdeposit.lock().unwrap().clone_from(&buf);
+    let mut json = Json::from_str(&unsafe{String::from_utf8_unchecked(buf)}[..]).unwrap();
+	let mut btm = BTreeMap::new();
+	btm.insert(".REQUEST_TIME".to_string(), Json::String(format!("{}", now.strftime("%y/%m/%d %T").unwrap()).to_string()));
+	json.as_array_mut().unwrap().push(Json::Object(btm));
+    bufdeposit.lock().unwrap().clone_from(&encode(&json).unwrap());
     *semaphor.lock().unwrap() = true;
 }
 
-fn print(bufdeposit: Arc<Mutex<Vec<u8>>>, file: &Arc<Mutex<File>>, print_header: bool) {
+fn print(bufdeposit: Arc<Mutex<String>>, file: &Arc<Mutex<File>>, print_header: bool) {
     let buf = bufdeposit.lock().unwrap().clone();
-    let json = Json::from_str(&unsafe{String::from_utf8_unchecked(buf)}[..]).unwrap();
+    let json = Json::from_str(&buf[..]).unwrap();
     let mut array = json.as_array().unwrap().clone();
     array.retain(|t| !(t.as_object().unwrap().contains_key("row1_HARTASEN_DATA")));
     array.sort_by_key(|t| t.as_object().unwrap().iter().next().unwrap().0.clone());
@@ -53,22 +59,24 @@ fn print(bufdeposit: Arc<Mutex<Vec<u8>>>, file: &Arc<Mutex<File>>, print_header:
     print_to_file(file, "\n").unwrap();
 }
 
-fn get_timer(bufdeposit: Arc<Mutex<Vec<u8>>>, semaphor: Arc<Mutex<bool>>) {
+fn get_timer(bufdeposit: Arc<Mutex<String>>, semaphor: Arc<Mutex<bool>>) {
     let now = time::now();
     sleep(Duration::new(0, 1000_000_000 - now.tm_nsec as u32));
     loop {
         let bufdeposit_clone = bufdeposit.clone();
         let semaphor_clone = semaphor.clone();
         thread::spawn(move || get(bufdeposit_clone, semaphor_clone));
+		let now = time::now();
+		let sec_sleep = 10 - ((now.tm_sec + 5) % 10) as u64;
         if now.tm_nsec < 500_000_000 && now.tm_nsec > 0 {
-            sleep(Duration::new(9, 1000_000_000 - now.tm_nsec as u32));
+            sleep(Duration::new(sec_sleep - 1, 1000_000_000 - now.tm_nsec as u32));
         } else {
-            sleep(Duration::new(10, 1000_000_000 - now.tm_nsec as u32));
+            sleep(Duration::new(sec_sleep, 1000_000_000 - now.tm_nsec as u32));
         }
     }
 }
 
-fn print_timer(bufdeposit: Arc<Mutex<Vec<u8>>>, semaphor: Arc<Mutex<bool>>) {
+fn print_timer(bufdeposit: Arc<Mutex<String>>, semaphor: Arc<Mutex<bool>>) {
     let now = time::now();
     let mut old_path_str = format!("transel{}.txt", now.strftime("20%y%m%d").unwrap());
     let path_str = format!("transel{}.txt", now.strftime("20%y%m%d").unwrap());
@@ -95,16 +103,17 @@ fn print_timer(bufdeposit: Arc<Mutex<Vec<u8>>>, semaphor: Arc<Mutex<bool>>) {
             print_header = false;
         }
         let now = time::now();
+		let sec_sleep = 10 - (now.tm_sec % 10) as u64;
         if now.tm_nsec < 500_000_000 && now.tm_nsec > 0 {
-            sleep(Duration::new(9, 1000_000_000 - now.tm_nsec as u32));
+            sleep(Duration::new(sec_sleep - 1, 1000_000_000 - now.tm_nsec as u32));
         } else {
-            sleep(Duration::new(10, 1000_000_000 - now.tm_nsec as u32));
+            sleep(Duration::new(sec_sleep, 1000_000_000 - now.tm_nsec as u32));
         }
     }
 }
 
 fn main() {
-    let bufdeposit = Arc::new(Mutex::new(Vec::<u8>::new()));
+    let bufdeposit = Arc::new(Mutex::new(String::new()));
     let bufdeposit_get = bufdeposit.clone();
     let semaphor = Arc::new(Mutex::new(false));
     let semaphor_get = semaphor.clone();
